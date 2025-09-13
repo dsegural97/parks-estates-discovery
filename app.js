@@ -6,6 +6,7 @@
 const STORAGE_KEY = "visited-parks-and-fundos-v1";
 const USER_POS_KEY = "user-pos-v1";
 const FILTERS_KEY = "filters-v1";
+const PLACES_KEY = "custom-places-v1"; // nuevos lugares agregados por el usuario
 
 function toKey(str) {
   return str
@@ -15,14 +16,8 @@ function toKey(str) {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/(^-|-$)/g, "");
 }
-function wazeUrl(name, district) {
-  const q = encodeURIComponent(`${name}, ${district}, Lima, Perú`);
-  return `https://waze.com/ul?q=${q}&navigate=yes`;
-}
-function mapsUrl(name, district) {
-  const q = encodeURIComponent(`${name}, ${district}, Lima, Perú`);
-  return `https://www.google.com/maps/search/?api=1&query=${q}`;
-}
+
+/* Normalizador simple para búsquedas locales */
 function norm(s) {
   return s
     .toLowerCase()
@@ -31,9 +26,31 @@ function norm(s) {
 }
 
 /* =======================
+   Enlaces y navegación
+   ======================= */
+function wazeRouteUrlById(id, name, district) {
+  const c = COORDS[id];
+  if (c && Number.isFinite(c.lat) && Number.isFinite(c.lon)) {
+    return `https://waze.com/ul?ll=${c.lat},${c.lon}&navigate=yes`;
+  }
+  const q = encodeURIComponent(`${name}, ${district}, Lima, Perú`);
+  return `https://waze.com/ul?q=${q}&navigate=yes`;
+}
+function mapsRouteUrlById(id, name, district, userPos) {
+  const c = COORDS[id];
+  const dest = c ? `${c.lat},${c.lon}` : `${name}, ${district}, Lima, Perú`;
+  const origin =
+    userPos && Number.isFinite(userPos.lat) && Number.isFinite(userPos.lon)
+      ? `&origin=${userPos.lat},${userPos.lon}`
+      : "";
+  return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(
+    dest
+  )}&travelmode=driving${origin}`;
+}
+
+/* =======================
    Distancia y tiempo
    ======================= */
-/* Distancia Haversine (km, línea recta) */
 function haversineKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
   const toRad = (d) => (d * Math.PI) / 180;
@@ -44,8 +61,6 @@ function haversineKm(lat1, lon1, lat2, lon2) {
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
   return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 }
-
-/* Tiempo de manejo aproximado (RANGO minRápido–minLento) */
 function estimateDriveRangeMin(km) {
   if (km == null || !isFinite(km)) return null;
   const baseMin = 5;
@@ -69,7 +84,7 @@ function fmtMin(min) {
 }
 
 /* =======================
-   Coordenadas aproximadas
+   Coordenadas (base)
    ======================= */
 const COORDS = {
   [toKey("Parque de la amistad Surco")]: { lat: -12.1495, lon: -76.998 },
@@ -128,9 +143,9 @@ const GMAPS_APP_ICON = `
 `;
 
 /* =======================
-   Datos de parques y fundos
+   Datos base de lugares
    ======================= */
-const DATA = [
+const DATA_BASE = [
   // Parques
   {
     id: toKey("Parque de la amistad Surco"),
@@ -334,6 +349,18 @@ try {
   }
 } catch {}
 
+/* Lugares agregados por el usuario (persistidos) */
+let CUSTOM_PLACES = [];
+try {
+  const raw = localStorage.getItem(PLACES_KEY);
+  if (raw) CUSTOM_PLACES = JSON.parse(raw) || [];
+} catch {}
+
+/* Devuelve toda la data (base + agregados) */
+function ALL_DATA() {
+  return DATA_BASE.concat(CUSTOM_PLACES);
+}
+
 function persistFilters() {
   try {
     localStorage.setItem(
@@ -345,23 +372,76 @@ function persistFilters() {
     );
   } catch {}
 }
+function persistCustomPlaces() {
+  try {
+    localStorage.setItem(PLACES_KEY, JSON.stringify(CUSTOM_PLACES));
+  } catch {}
+}
+function save() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(visited));
+  } catch {}
+}
+function saveUserPos() {
+  try {
+    localStorage.setItem(USER_POS_KEY, JSON.stringify(userPos));
+  } catch {}
+}
+
+/* =======================
+   Parser automático de coordenadas desde link de Google Maps
+   (acepta varios formatos: @lat,lon, 'q=lat,lon', 'destination=lat,lon', etc.)
+   ======================= */
+function parseLatLonFromGMaps(url) {
+  if (!url) return null;
+  try {
+    const u = decodeURIComponent(String(url).trim());
+
+    // 1) @lat,lon,zoom
+    {
+      const m = u.match(/@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/);
+      if (m) return { lat: parseFloat(m[1]), lon: parseFloat(m[2]) };
+    }
+
+    // 2) query=lat,lon OR q=lat,lon OR destination=lat,lon (Google Directions)
+    {
+      const m = u.match(
+        /(?:[?&](?:q|query|destination)=)(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/
+      );
+      if (m) return { lat: parseFloat(m[1]), lon: parseFloat(m[2]) };
+    }
+
+    // 3) Place/dir URLs que terminan en /@lat,lon
+    {
+      const m = u.match(/\/@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/);
+      if (m) return { lat: parseFloat(m[1]), lon: parseFloat(m[2]) };
+    }
+
+    // 4) Coordenadas “sueltas” en el string (primera pareja lat,lon razonable)
+    {
+      const m = u.match(/(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/);
+      if (m) {
+        const lat = parseFloat(m[1]),
+          lon = parseFloat(m[2]);
+        if (Math.abs(lat) <= 90 && Math.abs(lon) <= 180) return { lat, lon };
+      }
+    }
+  } catch {}
+  return null;
+}
 
 /* =======================
    Conteos y distritos dinámicos
    ======================= */
 const TYPES = ["Parque", "Fundo"];
 
-/* Calcula:
-   - typeCounts: conteo por tipo (Parque/Fundo)
-   - districtCounts: conteo por distrito bajo los tipos activos
-   - availableDistricts: solo los distritos con conteo > 0 (ordenados)
-*/
 function computeCounts() {
+  const data = ALL_DATA();
   const q = norm($q.value || "");
   const onlyPending = $only.checked;
 
-  // Para tipos: respeta q, onlyPending y distritos activos (ignora tipos activos)
-  const baseForType = DATA.filter((p) => {
+  // Tipos: respeta q, onlyPending y distritos activos
+  const baseForType = data.filter((p) => {
     const hay = norm(`${p.name} ${p.district} ${p.type}`);
     const passQ = !q || hay.includes(q);
     const passOnly = !onlyPending || !visited[p.id];
@@ -375,8 +455,8 @@ function computeCounts() {
     typeCounts[p.type] = (typeCounts[p.type] || 0) + 1;
   });
 
-  // Para distritos: respeta q, onlyPending y tipos activos (ignora distritos activos)
-  const baseForDistrict = DATA.filter((p) => {
+  // Distritos: respeta q, onlyPending y tipos activos
+  const baseForDistrict = data.filter((p) => {
     const hay = norm(`${p.name} ${p.district} ${p.type}`);
     const passQ = !q || hay.includes(q);
     const passOnly = !onlyPending || !visited[p.id];
@@ -398,13 +478,12 @@ function computeCounts() {
 }
 
 /* =======================
-   Render de chips
-   (incluye: "Todos" para distritos)
+   Render de chips (con "Todos" en distritos y fila condicional)
    ======================= */
 function renderChips() {
   const { typeCounts, districtCounts, availableDistricts } = computeCounts();
 
-  // ---- TIPOS ----
+  // TIPOS
   $typeChips.innerHTML = TYPES.map(
     (t) => `
     <button class="chip-btn ${
@@ -415,7 +494,7 @@ function renderChips() {
   `
   ).join("");
 
-  // ---- DISTRITOS (solo si hay algún tipo activo) ----
+  // DISTRITOS (solo si hay algún tipo activo)
   const districtRow =
     $districtChips.closest(".filters-row") || $districtChips.parentElement;
   if (selectedTypes.size === 0) {
@@ -426,7 +505,7 @@ function renderChips() {
     if (districtRow) districtRow.style.display = "flex";
   }
 
-  // Si un distrito seleccionado ya no está disponible, lo quitamos
+  // Limpia distritos que ya no aplican
   let changed = false;
   for (const d of Array.from(selectedDistricts)) {
     if (!availableDistricts.includes(d)) {
@@ -436,20 +515,18 @@ function renderChips() {
   }
   if (changed) persistFilters();
 
-  // ¿Está activo "Todos"? -> cuando TODOS los disponibles están seleccionados
+  // ¿"Todos" activo?
   const allSelected =
     availableDistricts.length > 0 &&
     availableDistricts.every((d) => selectedDistricts.has(d)) &&
     selectedDistricts.size === availableDistricts.length;
 
-  // Conteo total para el chip "Todos"
   const totalAvail = availableDistricts.reduce(
     (sum, d) => sum + (districtCounts[d] || 0),
     0
   );
 
-  // Pintar: primero "Todos", luego cada distrito
-  const districtChipsHtml = [
+  $districtChips.innerHTML = [
     `
     <button class="chip-btn ${
       allSelected ? "active" : ""
@@ -467,46 +544,34 @@ function renderChips() {
     `
     ),
   ].join("");
-
-  $districtChips.innerHTML = districtChipsHtml;
 }
 
 /* =======================
-   Cálculo de lista + render tarjetas
+   Cálculo y render de tarjetas
    ======================= */
-function save() {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(visited));
-  } catch {}
-}
-function saveUserPos() {
-  try {
-    localStorage.setItem(USER_POS_KEY, JSON.stringify(userPos));
-  } catch {}
-}
-
-/* Aplica búsqueda + filtros + orden.
-   Nota: si no hay distritos seleccionados => no se filtra por distrito. */
 function compute() {
+  const data = ALL_DATA();
   const q = norm($q.value || "");
   const only = $only.checked;
 
-  let items = DATA.map((p) => {
-    const c = COORDS[p.id];
-    let dist = null;
-    if (userPos && c)
-      dist = haversineKm(userPos.lat, userPos.lon, c.lat, c.lon);
-    return { ...p, _distanceKm: dist };
-  }).filter((p) => {
-    const hay = norm(`${p.name} ${p.district} ${p.type}`);
-    const passQ = !q || hay.includes(q);
-    const passOnly = !only || !visited[p.id];
-    const passType = selectedTypes.size ? selectedTypes.has(p.type) : true;
-    const passDistrict = selectedDistricts.size
-      ? selectedDistricts.has(p.district)
-      : true;
-    return passQ && passOnly && passType && passDistrict;
-  });
+  let items = data
+    .map((p) => {
+      const c = COORDS[p.id];
+      let dist = null;
+      if (userPos && c)
+        dist = haversineKm(userPos.lat, userPos.lon, c.lat, c.lon);
+      return { ...p, _distanceKm: dist };
+    })
+    .filter((p) => {
+      const hay = norm(`${p.name} ${p.district} ${p.type}`);
+      const passQ = !q || hay.includes(q);
+      const passOnly = !only || !visited[p.id];
+      const passType = selectedTypes.size ? selectedTypes.has(p.type) : true;
+      const passDistrict = selectedDistricts.size
+        ? selectedDistricts.has(p.district)
+        : true;
+      return passQ && passOnly && passType && passDistrict;
+    });
 
   const sort = $sort.value;
   items.sort((a, b) => {
@@ -530,12 +595,11 @@ function compute() {
   return items;
 }
 
-/* Pinta tarjetas y vuelve a enlazar eventos */
 function render() {
   const items = compute();
 
-  // Progreso general (visitados)
-  const total = DATA.length;
+  // Progreso
+  const total = ALL_DATA().length;
   const done = Object.values(visited).filter(Boolean).length;
   const percent = Math.round((done / Math.max(1, total)) * 100);
   $fill.style.width = percent + "%";
@@ -555,6 +619,10 @@ function render() {
               distTxt || "—"
             }${timeTxt ? " • ~" + timeTxt : ""}</span>`
           : "";
+
+      const wazeHref = wazeRouteUrlById(p.id, p.name, p.district);
+      const mapsHref = mapsRouteUrlById(p.id, p.name, p.district, userPos);
+
       return `
       <div class="card">
         <div>
@@ -573,17 +641,11 @@ function render() {
         </div>
 
         <div class="actions actions-centered">
-          <a class="link icon-only" href="${wazeUrl(
-            p.name,
-            p.district
-          )}" target="_blank" rel="noopener noreferrer"
-             title="Abrir en Waze" aria-label="Abrir en Waze">${WAZE_APP_ICON}</a>
+          <a class="link icon-only" href="${wazeHref}" target="_blank" rel="noopener noreferrer"
+             title="Ruta desde aquí (Waze)" aria-label="Ruta desde aquí (Waze)">${WAZE_APP_ICON}</a>
 
-          <a class="link icon-only" href="${mapsUrl(
-            p.name,
-            p.district
-          )}" target="_blank" rel="noopener noreferrer"
-             title="Abrir en Google Maps" aria-label="Abrir en Google Maps">${GMAPS_APP_ICON}</a>
+          <a class="link icon-only" href="${mapsHref}" target="_blank" rel="noopener noreferrer"
+             title="Ruta desde aquí (Google Maps)" aria-label="Ruta desde aquí (Google Maps)">${GMAPS_APP_ICON}</a>
 
           <label class="small check-centered">
             <input data-id="${p.id}" class="visit-toggle" type="checkbox" ${
@@ -602,18 +664,17 @@ function render() {
       const id = e.target.getAttribute("data-id");
       visited[id] = !!e.target.checked;
       save();
-      render(); // refresca progreso y etiquetas "Visitado"
+      render();
     });
   });
 
-  // Render chips (con “Todos” y conteos) cada vez que cambia la lista
+  // Chips
   renderChips();
 }
 
 /* =======================
-   Eventos de UI (chips, búsqueda, ubicación)
+   UI: Chips, búsqueda, ubicación
    ======================= */
-// Tipos (Parque/Fundo)
 $typeChips.addEventListener("click", (e) => {
   const btn = e.target.closest("[data-type]");
   if (!btn) return;
@@ -624,22 +685,18 @@ $typeChips.addEventListener("click", (e) => {
   render();
 });
 
-// Distritos (incluye “Todos”)
 $districtChips.addEventListener("click", (e) => {
   const allBtn = e.target.closest('[data-all="1"]');
   if (allBtn) {
-    // Toggle "Todos": si NO están todos seleccionados -> seleccionar todos; si sí -> limpiar selección
     const { availableDistricts } = computeCounts();
     const allSelected =
       availableDistricts.length > 0 &&
       availableDistricts.every((d) => selectedDistricts.has(d)) &&
       selectedDistricts.size === availableDistricts.length;
 
-    if (allSelected) {
-      selectedDistricts.clear(); // limpiar = ver todos
-    } else {
-      selectedDistricts = new Set(availableDistricts); // seleccionar todos visibles
-    }
+    if (allSelected) selectedDistricts.clear();
+    else selectedDistricts = new Set(availableDistricts);
+
     persistFilters();
     render();
     return;
@@ -654,7 +711,6 @@ $districtChips.addEventListener("click", (e) => {
   render();
 });
 
-// Limpiar filtros
 $clearFilters.addEventListener("click", () => {
   selectedTypes.clear();
   selectedDistricts.clear();
@@ -662,7 +718,6 @@ $clearFilters.addEventListener("click", () => {
   render();
 });
 
-// Usar ubicación (para ordenar por cercanía y mostrar distancia/tiempo)
 $useLoc.addEventListener("click", () => {
   if (!("geolocation" in navigator)) {
     alert("Tu navegador no soporta geolocalización.");
@@ -685,10 +740,186 @@ $useLoc.addEventListener("click", () => {
   );
 });
 
-// Búsqueda / Orden / Solo pendientes
 $q.addEventListener("input", render);
 $sort.addEventListener("change", render);
 $only.addEventListener("change", render);
+
+/* =======================
+   NUEVO: Botón "+ Agregar lugar" (inyectado)
+   - Abre un modal con formulario
+   - Guarda en localStorage
+   - Opción de pegar link de Google Maps para detectar lat/lon automáticamente
+   ======================= */
+(function injectAddPlaceUI() {
+  // 1) Estilos mínimos del modal (inyectados para no tocar tu CSS)
+  const css = `
+  .addplace-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;z-index:9999}
+  .addplace-modal{background:#fff;color:#111;max-width:520px;width:92%;border-radius:14px;border:1px solid #e5e7eb;box-shadow:0 10px 30px rgba(0,0,0,.15)}
+  .addplace-head{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #e5e7eb}
+  .addplace-body{padding:16px;display:grid;gap:12px}
+  .addplace-row{display:grid;gap:6px}
+  .addplace-row label{font-size:12px;color:#374151}
+  .addplace-row input,.addplace-row select, .addplace-row textarea{padding:10px 12px;border:1px solid #d1d5db;border-radius:10px;font-size:14px}
+  .addplace-foot{display:flex;gap:10px;justify-content:flex-end;padding:12px 16px;border-top:1px solid #e5e7eb}
+  .addplace-btn{border:1px solid #d1d5db;border-radius:10px;background:#f9fafb;padding:10px 14px;cursor:pointer}
+  .addplace-btn.primary{background:#0284c7;color:#fff;border-color:#0284c7}
+  .addplace-close{background:transparent;border:none;font-size:18px;cursor:pointer}
+  `;
+  const style = document.createElement("style");
+  style.textContent = css;
+  document.head.appendChild(style);
+
+  // 2) Botón en la toolbar
+  const toolbar = document.querySelector(".toolbar") || document.body;
+  const addBtn = document.createElement("button");
+  addBtn.className = "btn";
+  addBtn.textContent = "+ Agregar lugar";
+  addBtn.title = "Agregar Parque o Fundo";
+  toolbar.appendChild(addBtn);
+
+  // 3) Modal HTML
+  const backdrop = document.createElement("div");
+  backdrop.className = "addplace-backdrop";
+  backdrop.innerHTML = `
+    <div class="addplace-modal" role="dialog" aria-modal="true" aria-labelledby="ap-title">
+      <div class="addplace-head">
+        <strong id="ap-title">Agregar lugar</strong>
+        <button class="addplace-close" aria-label="Cerrar">&times;</button>
+      </div>
+      <div class="addplace-body">
+        <div class="addplace-row">
+          <label>Tipo</label>
+          <select id="ap-type">
+            <option value="Parque">Parque</option>
+            <option value="Fundo">Fundo</option>
+          </select>
+        </div>
+        <div class="addplace-row">
+          <label>Nombre</label>
+          <input id="ap-name" placeholder="Ej. Parque Central" />
+        </div>
+        <div class="addplace-row">
+          <label>Distrito</label>
+          <input id="ap-district" placeholder="Ej. Miraflores" />
+        </div>
+        <div class="addplace-row">
+          <label>Link de Google Maps (opcional — detecta coordenadas)</label>
+          <input id="ap-link" placeholder="Pega aquí el enlace que compartes desde Maps" />
+        </div>
+        <div class="addplace-row">
+          <label>Coordenadas (opcional si pegaste el link):</label>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <input id="ap-lat" placeholder="lat (ej. -12.12)" />
+            <input id="ap-lon" placeholder="lon (ej. -77.03)" />
+          </div>
+        </div>
+        <p style="font-size:12px;color:#6b7280;margin:4px 0 0">
+          Si no pones coordenadas, igual podrás abrir la ruta (Waze/Maps buscarán por nombre y distrito).
+          Para ver <em>distancia</em> y <em>tiempo</em> aquí, pega el link de Maps o pon lat/lon.
+        </p>
+      </div>
+      <div class="addplace-foot">
+        <button class="addplace-btn" id="ap-cancel">Cancelar</button>
+        <button class="addplace-btn primary" id="ap-save">Guardar</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+
+  const $type = () => document.getElementById("ap-type");
+  const $name = () => document.getElementById("ap-name");
+  const $district = () => document.getElementById("ap-district");
+  const $link = () => document.getElementById("ap-link");
+  const $lat = () => document.getElementById("ap-lat");
+  const $lon = () => document.getElementById("ap-lon");
+
+  function openModal() {
+    $type().value = "Parque";
+    $name().value = "";
+    $district().value = "";
+    $link().value = "";
+    $lat().value = "";
+    $lon().value = "";
+    backdrop.style.display = "flex";
+    setTimeout(() => $name().focus(), 0);
+  }
+  function closeModal() {
+    backdrop.style.display = "none";
+  }
+
+  addBtn.addEventListener("click", openModal);
+  backdrop
+    .querySelector(".addplace-close")
+    .addEventListener("click", closeModal);
+  backdrop.querySelector("#ap-cancel").addEventListener("click", closeModal);
+  backdrop.addEventListener("click", (e) => {
+    if (e.target === backdrop) closeModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && backdrop.style.display === "flex") closeModal();
+  });
+
+  // Autodetectar coords al pegar link
+  $link().addEventListener("change", () => {
+    const coords = parseLatLonFromGMaps($link().value);
+    if (coords) {
+      $lat().value = coords.lat;
+      $lon().value = coords.lon;
+    }
+  });
+
+  // Guardar
+  backdrop.querySelector("#ap-save").addEventListener("click", () => {
+    const type = ($type().value || "").trim();
+    const name = ($name().value || "").trim();
+    const district = ($district().value || "").trim();
+
+    if (!type || !name || !district) {
+      alert("Completa Tipo, Nombre y Distrito.");
+      return;
+    }
+    if (!["Parque", "Fundo"].includes(type)) {
+      alert("Tipo inválido.");
+      return;
+    }
+
+    // id estable
+    const id = toKey(
+      `${type === "Parque" ? "Parque" : "Fundo"} ${name} ${district}`
+    );
+
+    // Detecta coords: preferir link -> inputs
+    let lat = parseFloat($lat().value);
+    let lon = parseFloat($lon().value);
+    if (Number.isNaN(lat) || Number.isNaN(lon)) {
+      const coords = parseLatLonFromGMaps($link().value);
+      if (coords) {
+        lat = coords.lat;
+        lon = coords.lon;
+      }
+    }
+
+    // Si hay coords válidas, guarda en COORDS (sobre-escribe si ya existe)
+    if (Number.isFinite(lat) && Number.isFinite(lon)) {
+      COORDS[id] = { lat, lon };
+    }
+
+    // ¿Existe ya el lugar? Si existe, actualizamos nombre/distrito/tipo (merge)
+    const existingIdx = CUSTOM_PLACES.findIndex((p) => p.id === id);
+    const payload = { id, name, district, type };
+
+    if (existingIdx >= 0) {
+      CUSTOM_PLACES[existingIdx] = payload;
+    } else {
+      CUSTOM_PLACES.push(payload);
+    }
+
+    // Persistir y refrescar
+    persistCustomPlaces();
+    closeModal();
+    render();
+  });
+})();
 
 /* =======================
    Inicio
@@ -699,30 +930,18 @@ render();
    Tests ligeros (consola)
    ======================= */
 (function runTests() {
-  // Rango de tiempo válido
-  const r = estimateDriveRangeMin(5);
-  console.assert(
-    Array.isArray(r) && r[0] > 0 && r[1] >= r[0],
-    "rango de tiempo válido"
-  );
-
   // Haversine 0
   console.assert(Math.abs(haversineKm(0, 0, 0, 0)) < 1e-9, "haversine 0 OK");
 
-  // Chip “Todos” de distritos: seleccionar/des seleccionar en función de lo disponible
-  const prevTypes = new Set(selectedTypes);
-  const prevDists = new Set(selectedDistricts);
-  selectedTypes = new Set(["Parque"]); // forzamos un estado estable
-  selectedDistricts.clear();
-  renderChips();
-  const c1 = computeCounts().availableDistricts;
-  selectedDistricts = new Set(c1);
-  const allSelected =
-    c1.length > 0 &&
-    c1.every((d) => selectedDistricts.has(d)) &&
-    selectedDistricts.size === c1.length;
-  console.assert(allSelected, "Todos los distritos quedaron seleccionados");
-  selectedTypes = prevTypes;
-  selectedDistricts = prevDists;
-  renderChips();
+  // Parser de Maps: varios formatos válidos
+  const t1 = parseLatLonFromGMaps(
+    "https://www.google.com/maps/place/@-12.12,-77.03,15z"
+  );
+  const t2 = parseLatLonFromGMaps(
+    "https://www.google.com/maps/dir/?api=1&destination=-12.1,-77.05"
+  );
+  const t3 = parseLatLonFromGMaps("https://maps.google.com/?q=-12.08,-77.02");
+  console.assert(t1 && t1.lat && t1.lon, "parser @lat,lon OK");
+  console.assert(t2 && t2.lat && t2.lon, "parser destination=lat,lon OK");
+  console.assert(t3 && t3.lat && t3.lon, "parser q=lat,lon OK");
 })();
