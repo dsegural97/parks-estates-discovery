@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Parques y Fundos de Lima – Waze/Maps + Check</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+
+  <body>
+    <main class="container">
+      <header>
+        <div class="toolbar">
+          <!-- Fila 1: título (izq) | +Agregar (der, lo inyecta JS) -->
+          <div class="title-block">
+            <h1>Parques y Fundos de Lima</h1>
+            <div class="small">
+              Accesos directos (icono) + check guardado local
+            </div>
+          </div>
+
+          <!-- Fila 2: controles -->
+          <div class="controls">
+            <input
+              id="q"
+              class="input"
+              placeholder="Buscar por nombre, distrito o tipo…"
+            />
+            <select id="sort" class="select">
+              <option value="type">Ordenar por tipo</option>
+              <option value="distance">Ordenar por distancia</option>
+              <option value="name">Ordenar por nombre</option>
+              <option value="district">Ordenar por distrito</option>
+            </select>
+            <button id="useLocation" class="btn">📍 Usar mi ubicación</button>
+
+            <label
+              class="small only-pending"
+              style="display: flex; align-items: center; gap: 6px"
+            >
+              <input id="onlyPending" type="checkbox" /> Solo pendientes
+            </label>
+
+            <div class="progress small" title="Progreso de lugares visitados">
+              <div class="bar">
+                <div id="progressFill" class="fill" style="width: 0%"></div>
+              </div>
+              <div id="progressText" style="text-align: right; margin-top: 4px">
+                0/0 (0%)
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <!-- Filtros -->
+      <section class="filters" style="margin-top: 12px">
+        <div class="small" style="margin: 8px 0 4px">Tipo:</div>
+        <div
+          id="typeChips"
+          class="controls"
+          style="
+            grid-template-columns: repeat(auto-fill, minmax(120px, auto));
+            grid-template-areas: none;
+          "
+        ></div>
+
+        <div
+          class="filters-row"
+          style="display: flex; flex-direction: column; margin-top: 12px"
+        >
+          <div class="small" style="margin: 0 0 4px">Distrito:</div>
+          <div
+            id="districtChips"
+            class="controls"
+            style="
+              grid-template-columns: repeat(auto-fill, minmax(140px, auto));
+              grid-template-areas: none;
+            "
+          ></div>
+        </div>
+
+        <div style="margin-top: 8px">
+          <button id="clearFilters" class="btn">Limpiar filtros</button>
+        </div>
+      </section>
+
+      <!-- Lista -->
+      <div id="list" class="grid"></div>
+
+      <footer>© <span id="year"></span></footer>
+    </main>
+
+    <!-- Tu app (ES Modules) -->
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
